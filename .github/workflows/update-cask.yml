@@ -1,0 +1,106 @@
+name: Update OhMyShot Cask
+
+on:
+  repository_dispatch:
+    types: [ohmyshot-release]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release version without leading v (e.g. 0.5.1)
+        required: true
+        type: string
+      sha256:
+        description: Optional SHA-256 of OhMyShot-<version>.dmg (computed from GitHub release if omitted)
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: write
+
+concurrency:
+  group: update-ohmyshot-cask
+  cancel-in-progress: false
+
+jobs:
+  update-cask:
+    name: Bump Casks/ohmyshot.rb
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Resolve version and verify DMG SHA-256
+        id: resolve
+        env:
+          INPUT_VERSION: ${{ github.event.client_payload.version || inputs.version }}
+          INPUT_SHA256: ${{ github.event.client_payload.sha256 || inputs.sha256 }}
+        run: |
+          set -euo pipefail
+          VERSION="${INPUT_VERSION#v}"
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Invalid version: $VERSION"
+            exit 1
+          fi
+
+          DMG_URL="https://github.com/MMFoundation/OhMyShot/releases/download/v${VERSION}/OhMyShot-${VERSION}.dmg"
+          echo "Downloading $DMG_URL to verify checksum..."
+          for attempt in 1 2 3 4 5; do
+            if curl -fsSL "$DMG_URL" -o OhMyShot.dmg; then
+              break
+            fi
+            if [ "$attempt" -eq 5 ]; then
+              echo "::error::Could not download $DMG_URL after 5 attempts"
+              exit 1
+            fi
+            sleep 10
+          done
+
+          ACTUAL_SHA=$(sha256sum OhMyShot.dmg | cut -d' ' -f1)
+          rm -f OhMyShot.dmg
+
+          if [ -n "$INPUT_SHA256" ] && [ "$INPUT_SHA256" != "$ACTUAL_SHA" ]; then
+            echo "::error::Provided SHA-256 ($INPUT_SHA256) does not match live asset ($ACTUAL_SHA)"
+            exit 1
+          fi
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "sha256=$ACTUAL_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Update Casks/ohmyshot.rb
+        env:
+          NEW_VERSION: ${{ steps.resolve.outputs.version }}
+          NEW_SHA256: ${{ steps.resolve.outputs.sha256 }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os, re, pathlib
+
+          cask_path = pathlib.Path("Casks/ohmyshot.rb")
+          text = cask_path.read_text(encoding="utf-8")
+          version = os.environ["NEW_VERSION"]
+          sha256 = os.environ["NEW_SHA256"]
+
+          updated, n_ver = re.subn(r'^  version "[^"]+"$', f'  version "{version}"', text, count=1, flags=re.M)
+          updated, n_sha = re.subn(r'^  sha256 "[0-9a-f]{64}"$', f'  sha256 "{sha256}"', updated, count=1, flags=re.M)
+          if n_ver != 1 or n_sha != 1:
+              raise SystemExit(f"Expected 1 version and 1 sha256 replacement, got ({n_ver}, {n_sha})")
+
+          cask_path.write_text(updated, encoding="utf-8")
+          PY
+          ruby -c Casks/ohmyshot.rb
+
+      - name: Commit and push
+        env:
+          NEW_VERSION: ${{ steps.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- Casks/ohmyshot.rb; then
+            echo "Casks/ohmyshot.rb is already at $NEW_VERSION"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Casks/ohmyshot.rb
+          git commit -m "ohmyshot $NEW_VERSION"
+          git push origin HEAD:main
