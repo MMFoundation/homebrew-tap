@@ -14,10 +14,11 @@ Official [Homebrew](https://brew.sh) tap for [MMFoundation](https://github.com/M
 brew install --cask mmfoundation/tap/ohmyshot
 ```
 
-Or tap once and install by name:
+Or tap once and install by name (on Homebrew 7+, trust the tap first):
 
 ```sh
 brew tap mmfoundation/tap
+brew trust mmfoundation/tap
 brew install --cask ohmyshot
 ```
 
